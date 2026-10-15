@@ -53,4 +53,5 @@ dependencies {
     androidTestImplementation(libs.ui.test.junit4)
     debugImplementation(libs.ui.test.manifest)
     debugImplementation(libs.ui.tooling)
+    implementation("androidx.health:health-services-client:1.1.0-alpha03")
 }

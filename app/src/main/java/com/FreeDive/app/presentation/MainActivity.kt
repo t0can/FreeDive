@@ -1,11 +1,22 @@
 package com.FreeDive.app.presentation
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,6 +31,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -30,6 +42,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -44,6 +58,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 import androidx.compose.foundation.layout.padding
+import android.view.WindowManager
 
 // SECTION 1 — SESSION RECORDS
 private data class DiveRecord(
@@ -53,20 +68,38 @@ private data class DiveRecord(
 )
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { FreeDiveScreen() }
+
+        setContent {
+            FreeDiveScreen(
+                onSessionActiveChanged = { active ->
+                    if (active) {
+                        window.addFlags(
+                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                        )
+                    } else {
+                        window.clearFlags(
+                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                        )
+                    }
+                }
+            )
+        }
     }
 }
 
 @Composable
-fun FreeDiveScreen() {
+fun FreeDiveScreen(
+    onSessionActiveChanged: (Boolean) -> Unit
+) {
     // SECTION 2 — COLOURS AND NAVIGATION
     val background = Color(0xFF07151C)
     val accent = Color(0xFF63D8D2)
     val secondary = Color(0xFFA9C6CE)
     val context = LocalContext.current
-    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
     val scope = rememberCoroutineScope()
 
     // SECTION 3 — SESSION STATE
@@ -76,7 +109,7 @@ fun FreeDiveScreen() {
     var sessionSeconds by remember { mutableStateOf(0) }
     var isDiving by remember { mutableStateOf(false) }
     var currentDepth by remember { mutableStateOf(0f) }
-    var currentHeartRate by remember { mutableStateOf(70) }
+    var currentHeartRate by remember { mutableStateOf<Int?>(null) }
     var diveStartMs by remember { mutableStateOf(0L) }
     var diveElapsedSeconds by remember { mutableStateOf(0) }
     var currentDiveMax by remember { mutableStateOf(0f) }
@@ -92,6 +125,108 @@ fun FreeDiveScreen() {
     var intervalComplete by remember { mutableStateOf(false) }
     val completedDives = remember { mutableStateListOf<DiveRecord>() }
 
+    // SECTION 3A — REAL HEART-RATE SENSOR (DEPTH REMAINS SIMULATED)
+    val sensorManager = remember(context) {
+        context.getSystemService(SensorManager::class.java)
+    }
+    val heartSensor = remember(sensorManager) {
+        sensorManager?.getDefaultSensor(Sensor.TYPE_HEART_RATE)
+    }
+    val heartPermission = if (Build.VERSION.SDK_INT >= 36) {
+        "android.permission.health.READ_HEART_RATE"
+    } else {
+        Manifest.permission.BODY_SENSORS
+    }
+    var heartPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, heartPermission) ==
+                    PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val heartPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        heartPermissionGranted = granted
+    }
+
+    DisposableEffect(sessionActive, heartPermissionGranted, heartSensor) {
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val bpm = event.values.firstOrNull()?.toInt() ?: return
+                if (bpm in 30..240) {
+                    currentHeartRate = bpm
+                    // Sample real HR readings during a dive, not simulated depth ticks.
+                    if (sessionActive && isDiving) {
+                        heartRateTotal += bpm
+                        heartRateSamples++
+                    }
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+        if (sessionActive && heartPermissionGranted && heartSensor != null) {
+            sensorManager?.registerListener(
+                listener, heartSensor, SensorManager.SENSOR_DELAY_NORMAL
+            )
+        }
+        onDispose { sensorManager?.unregisterListener(listener) }
+    }
+
+    // SECTION 3B — LIVE BAROMETRIC PRESSURE DIAGNOSTIC
+    // Pressure is measured in hPa. This is NOT a validated depth measurement.
+    val pressureSensor = remember(sensorManager) {
+        sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
+    }
+    var pressureHpa by remember { mutableStateOf<Float?>(null) }
+    var referencePressureHpa by remember { mutableStateOf<Float?>(null) }
+    var pressureSensorRunning by remember { mutableStateOf(false) }
+    // One sample per second, keeping the most recent five minutes.
+    val pressureHistory = remember { mutableStateListOf<Float>() }
+    var maxPositiveDeltaHpa by remember { mutableStateOf(0f) }
+    var recordingSeconds by remember { mutableStateOf(0) }
+
+    LaunchedEffect(pressureSensorRunning) {
+        while (pressureSensorRunning) {
+            val pressure = pressureHpa
+            val reference = referencePressureHpa
+            if (pressure != null && reference != null) {
+                val delta = pressure - reference
+                pressureHistory.add(delta)
+                if (pressureHistory.size > 300) pressureHistory.removeAt(0)
+                maxPositiveDeltaHpa = maxOf(maxPositiveDeltaHpa, delta)
+                recordingSeconds++
+            }
+            delay(1000L)
+        }
+    }
+
+
+    DisposableEffect(sensorManager, pressureSensor) {
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val reading = event.values.firstOrNull() ?: return
+                pressureHpa = reading
+                if (referencePressureHpa == null) {
+                    referencePressureHpa = reading
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+
+        pressureSensorRunning = if (pressureSensor != null) {
+            sensorManager?.registerListener(
+                listener, pressureSensor, SensorManager.SENSOR_DELAY_NORMAL
+            ) == true
+        } else {
+            false
+        }
+
+        onDispose {
+            sensorManager?.unregisterListener(listener)
+        }
+    }
+
     // SECTION 4 — VIBRATION AND SESSION ACTIONS
     fun vibrateWatch() {
         val vibrator = context.getSystemService(Vibrator::class.java)
@@ -106,7 +241,7 @@ fun FreeDiveScreen() {
         sessionSeconds = 0
         isDiving = false
         currentDepth = 0f
-        currentHeartRate = 70
+        currentHeartRate = null
         diveStartMs = 0L
         diveElapsedSeconds = 0
         currentDiveMax = 0f
@@ -122,6 +257,8 @@ fun FreeDiveScreen() {
         intervalComplete = false
         sessionEnded = false
         sessionActive = true
+        // Keep the watch display awake during the session.
+        onSessionActiveChanged(true)
     }
 
     fun endSession() {
@@ -130,14 +267,15 @@ fun FreeDiveScreen() {
         sessionActive = false
         sessionEnded = true
         intervalActive = false
+        // Restore normal watch screen behaviour.
+        onSessionActiveChanged(false)
     }
 
     // SECTION 5 — DEPTH AND HEART RATE PROCESSING
-    fun updateReading(depth: Float, heartRate: Int) {
+    fun updateReading(depth: Float) {
         if (!sessionActive) return
         val now = SystemClock.elapsedRealtime()
         currentDepth = depth.coerceAtLeast(0f)
-        currentHeartRate = heartRate
 
         if (!isDiving && currentDepth > 1.0f) {
             isDiving = true
@@ -154,10 +292,7 @@ fun FreeDiveScreen() {
         if (isDiving) {
             currentDiveMax = maxOf(currentDiveMax, currentDepth)
             sessionMax = maxOf(sessionMax, currentDepth)
-            if (currentDepth > 1.0f) {
-                heartRateTotal += heartRate
-                heartRateSamples++
-            } else {
+            if (currentDepth <= 1.0f) {
                 lastDiveMax = currentDiveMax
                 lastDiveSeconds = ((now - diveStartMs) / 1000L).toInt()
                 lastDiveAverageHeartRate =
@@ -176,22 +311,19 @@ fun FreeDiveScreen() {
         }
     }
 
-    // SECTION 6 — SIMULATED SENSOR FEED (NOT REAL WATCH SENSORS)
+    // SECTION 6 — SIMULATED DEPTH ONLY (NOT REAL DEPTH SENSOR)
     LaunchedEffect(sessionActive) {
         if (sessionActive) {
             val simulatedReadings = listOf(
-                0.0f to 72, 0.3f to 73, 0.7f to 74,
-                1.2f to 76, 2.5f to 80, 4.0f to 84,
-                7.5f to 89, 10.0f to 92, 12.4f to 96,
-                11.0f to 94, 8.0f to 90, 5.0f to 86,
-                2.0f to 82, 1.2f to 80, 0.8f to 78
+                0.0f, 0.3f, 0.7f, 1.2f, 2.5f, 4.0f, 7.5f,
+                10.0f, 12.4f, 11.0f, 8.0f, 5.0f, 2.0f, 1.2f, 0.8f
             )
             while (true) {
-                for ((depth, heartRate) in simulatedReadings) {
-                    updateReading(depth, heartRate)
+                for (depth in simulatedReadings) {
+                    updateReading(depth)
                     delay(1500L)
                 }
-                updateReading(0.0f, 72)
+                updateReading(0.0f)
                 delay(40_000L)
             }
         }
@@ -227,20 +359,20 @@ fun FreeDiveScreen() {
         }
     }
 
-    // SECTION 9 — ALL THREE PAGES
+    // SECTION 9 — ALL FOUR PAGES
     FreeDiveTheme {
         AppScaffold {
             ScreenScaffold { contentPadding ->
                 HorizontalPager(
                     state = pagerState,
-                    userScrollEnabled = sessionActive && !isDiving,
+                    userScrollEnabled = !isDiving,
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .background(background)
-                                .padding(contentPadding)
+                            .padding(contentPadding)
                             .padding(horizontal = 10.dp, vertical = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
@@ -256,7 +388,12 @@ fun FreeDiveScreen() {
                                 )
                                 Spacer(modifier = Modifier.height(12.dp))
                                 Button(onClick = {
-                                    if (!sessionActive) startSession()
+                                    if (!sessionActive) {
+                                        startSession()
+                                        if (!heartPermissionGranted) {
+                                            heartPermissionLauncher.launch(heartPermission)
+                                        }
+                                    }
                                     scope.launch { pagerState.animateScrollToPage(1) }
                                 }) {
                                     Text(if (sessionActive) "RETURN TO DIVE" else "START SESSION")
@@ -308,7 +445,7 @@ fun FreeDiveScreen() {
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "$currentHeartRate BPM",
+                                            text = currentHeartRate?.let { "$it BPM" } ?: "-- BPM",
                                             color = Color.White,
                                             fontSize = 20.sp,
                                             fontWeight = FontWeight.Medium,
@@ -433,6 +570,47 @@ fun FreeDiveScreen() {
                                     }
                                 }
                             }
+
+                            // PAGE 3 — PRESSURE GRAPH AND LOGGER
+                            3 -> {
+                                Text("PRESSURE GRAPH", color = accent, fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold, maxLines = 1)
+                                val delta = if (pressureHpa != null && referencePressureHpa != null)
+                                    pressureHpa!! - referencePressureHpa!! else null
+                                Text(
+                                    when {
+                                        pressureSensor == null -> "SENSOR NOT FOUND"
+                                        !pressureSensorRunning -> "SENSOR NOT RUNNING"
+                                        delta == null -> "WAITING FOR READING"
+                                        else -> "LIVE • 1 SAMPLE/SEC"
+                                    }, color = secondary, fontSize = 8.sp, maxLines = 1
+                                )
+                                Text(
+                                    "DELTA " + (delta?.let { "%+.2f".format(it) } ?: "--.--") + " hPa",
+                                    color = accent, fontSize = 19.sp,
+                                    fontWeight = FontWeight.Bold, maxLines = 1
+                                )
+                                // Graph auto-scales to the pressure changes observed.
+                                PressureHistoryGraph(
+                                    samples = pressureHistory.toList(),
+                                    lineColor = accent,
+                                    zeroColor = secondary,
+                                    modifier = Modifier.fillMaxWidth().height(62.dp)
+                                )
+                                Text(
+                                    "MAX +%.2f hPa    %ds".format(maxPositiveDeltaHpa, recordingSeconds),
+                                    color = Color.White, fontSize = 10.sp, maxLines = 1
+                                )
+                                Button(
+                                    onClick = {
+                                        referencePressureHpa = pressureHpa
+                                        pressureHistory.clear()
+                                        maxPositiveDeltaHpa = 0f
+                                        recordingSeconds = 0
+                                    },
+                                    enabled = pressureHpa != null
+                                ) { Text("RESET TEST", fontSize = 10.sp) }
+                            }
                         }
                     }
                 }
@@ -446,4 +624,40 @@ fun formatDuration(totalSeconds: Int): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return "%02d:%02d".format(minutes, seconds)
+}
+
+
+// SECTION 11 — LIVE PRESSURE GRAPH (DELTA hPa AGAINST TIME)
+@Composable
+private fun PressureHistoryGraph(
+    samples: List<Float>,
+    lineColor: Color,
+    zeroColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f) return@Canvas
+
+        // Keep zero in the plot; add a small margin so the line never touches the edge.
+        val minimum = minOf(0f, samples.minOrNull() ?: 0f)
+        val maximum = maxOf(0f, samples.maxOrNull() ?: 0f)
+        val range = maxOf(0.2f, maximum - minimum)
+        val low = minimum - range * 0.12f
+        val high = maximum + range * 0.12f
+        fun y(value: Float) = h * (1f - (value - low) / (high - low))
+
+        drawLine(zeroColor.copy(alpha = 0.45f), Offset(0f, y(0f)), Offset(w, y(0f)), 1.dp.toPx())
+        if (samples.size >= 2) {
+            val path = Path()
+            val firstX = 0f
+            path.moveTo(firstX, y(samples.first()))
+            samples.forEachIndexed { index, value ->
+                val x = w * index / (samples.size - 1).toFloat()
+                path.lineTo(x, y(value))
+            }
+            drawPath(path, lineColor, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
+        }
+    }
 }
