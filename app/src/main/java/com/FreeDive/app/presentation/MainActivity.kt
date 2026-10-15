@@ -172,8 +172,11 @@ fun FreeDiveScreen(
         onDispose { sensorManager?.unregisterListener(listener) }
     }
 
-    // SECTION 3B — LIVE BAROMETRIC PRESSURE DIAGNOSTIC
-    // Pressure is measured in hPa. This is NOT a validated depth measurement.
+    // SECTION 3B — LIVE BAROMETRIC PRESSURE AND EXPERIMENTAL DEPTH
+    // Experimental seawater conversion: 100.55 hPa per metre (density 1025 kg/m³, g 9.81 m/s²).
+    // NOT calibrated, verified or suitable for dive safety decisions.
+    val hpaPerMetre = 100.55f
+    var sessionSurfacePressureHpa by remember { mutableStateOf<Float?>(null) }
     val pressureSensor = remember(sensorManager) {
         sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
     }
@@ -236,6 +239,9 @@ fun FreeDiveScreen(
     }
 
     fun startSession() {
+        // Capture surface pressure while dry, before entering water.
+        // If no reading is available, do not fabricate a depth.
+        sessionSurfacePressureHpa = if (pressureSensorRunning) pressureHpa else null
         completedDives.clear()
         sessionStartMs = SystemClock.elapsedRealtime()
         sessionSeconds = 0
@@ -271,7 +277,7 @@ fun FreeDiveScreen(
         onSessionActiveChanged(false)
     }
 
-    // SECTION 5 — DEPTH AND HEART RATE PROCESSING
+    // SECTION 5 — EXPERIMENTAL DEPTH AND HEART RATE PROCESSING
     fun updateReading(depth: Float) {
         if (!sessionActive) return
         val now = SystemClock.elapsedRealtime()
@@ -311,21 +317,15 @@ fun FreeDiveScreen(
         }
     }
 
-    // SECTION 6 — SIMULATED DEPTH ONLY (NOT REAL DEPTH SENSOR)
-    LaunchedEffect(sessionActive) {
-        if (sessionActive) {
-            val simulatedReadings = listOf(
-                0.0f, 0.3f, 0.7f, 1.2f, 2.5f, 4.0f, 7.5f,
-                10.0f, 12.4f, 11.0f, 8.0f, 5.0f, 2.0f, 1.2f, 0.8f
-            )
-            while (true) {
-                for (depth in simulatedReadings) {
-                    updateReading(depth)
-                    delay(1500L)
-                }
-                updateReading(0.0f)
-                delay(40_000L)
-            }
+    // SECTION 6 — EXPERIMENTAL DEPTH FROM LIVE PRESSURE (NO SIMULATION)
+    // The session baseline is captured on START SESSION and held fixed until END.
+    // If the sensor stops reporting, the last value is stale; do not use it for safety.
+    LaunchedEffect(sessionActive, pressureHpa, sessionSurfacePressureHpa) {
+        val live = pressureHpa
+        val surface = sessionSurfacePressureHpa
+        if (sessionActive && pressureSensorRunning && live != null && surface != null) {
+            val estimatedDepthMetres = ((live - surface) / hpaPerMetre).coerceAtLeast(0f)
+            updateReading(estimatedDepthMetres)
         }
     }
 
@@ -359,7 +359,7 @@ fun FreeDiveScreen(
         }
     }
 
-    // SECTION 9 — ALL FOUR PAGES
+    // SECTION 9 — ALL FOUR PAGES (LIVE DEPTH + DIAGNOSTIC)
     FreeDiveTheme {
         AppScaffold {
             ScreenScaffold { contentPadding ->
@@ -386,16 +386,18 @@ fun FreeDiveScreen(
                                     fontSize = 19.sp,
                                     fontWeight = FontWeight.Bold
                                 )
-                                Spacer(modifier = Modifier.height(12.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("EXPERIMENTAL • NOT FOR DIVING", color = secondary, fontSize = 8.sp, maxLines = 1)
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Button(onClick = {
-                                    if (!sessionActive) {
+                                    if (!sessionActive && pressureSensorRunning && pressureHpa != null) {
                                         startSession()
                                         if (!heartPermissionGranted) {
                                             heartPermissionLauncher.launch(heartPermission)
                                         }
                                     }
                                     scope.launch { pagerState.animateScrollToPage(1) }
-                                }) {
+                                }, enabled = sessionActive || (pressureSensorRunning && pressureHpa != null)) {
                                     Text(if (sessionActive) "RETURN TO DIVE" else "START SESSION")
                                 }
                             }
@@ -408,8 +410,10 @@ fun FreeDiveScreen(
                                         color = secondary,
                                         fontSize = 12.sp
                                     )
+                                } else if (sessionSurfacePressureHpa == null) {
+                                    Text("WAITING FOR PRESSURE", color = secondary, fontSize = 11.sp)
                                 } else if (isDiving) {
-                                    // DIVE FACE — your compact layout
+                                    // DIVE FACE — experimental pressure-derived depth
                                     Text(
                                         text = formatDuration(diveElapsedSeconds),
                                         color = secondary,
@@ -453,7 +457,7 @@ fun FreeDiveScreen(
                                         )
                                     }
                                 } else {
-                                    // SURFACE FACE — your centred two-column layout
+                                    // SURFACE FACE — pressure-derived records
                                     Text(
                                         text = formatDuration(sessionSeconds),
                                         color = secondary,
@@ -573,7 +577,7 @@ fun FreeDiveScreen(
 
                             // PAGE 3 — PRESSURE GRAPH AND LOGGER
                             3 -> {
-                                Text("PRESSURE GRAPH", color = accent, fontSize = 13.sp,
+                                Text("PRESSURE GRAPH • TEST ONLY", color = accent, fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold, maxLines = 1)
                                 val delta = if (pressureHpa != null && referencePressureHpa != null)
                                     pressureHpa!! - referencePressureHpa!! else null
@@ -596,6 +600,10 @@ fun FreeDiveScreen(
                                     lineColor = accent,
                                     zeroColor = secondary,
                                     modifier = Modifier.fillMaxWidth().height(62.dp)
+                                )
+                                Text(
+                                    "DEPTH ~%.2f m".format(((delta ?: 0f) / hpaPerMetre).coerceAtLeast(0f)),
+                                    color = secondary, fontSize = 10.sp, maxLines = 1
                                 )
                                 Text(
                                     "MAX +%.2f hPa    %ds".format(maxPositiveDeltaHpa, recordingSeconds),
