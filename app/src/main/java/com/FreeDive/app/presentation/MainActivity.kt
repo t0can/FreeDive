@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -44,6 +43,7 @@ import com.FreeDive.app.presentation.theme.FreeDiveTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
+import androidx.compose.foundation.layout.padding
 
 // SECTION 1 — SESSION RECORDS
 private data class DiveRecord(
@@ -240,7 +240,7 @@ fun FreeDiveScreen() {
                         modifier = Modifier
                             .fillMaxSize()
                             .background(background)
-                            .padding(contentPadding)
+                                .padding(contentPadding)
                             .padding(horizontal = 10.dp, vertical = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
@@ -334,20 +334,20 @@ fun FreeDiveScreen() {
                                             modifier = Modifier.weight(1f),
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            Text("DIVE MAX", color = secondary, fontSize = 7.sp, maxLines = 1)
-                                            Text("%.1f m".format(lastDiveMax), color = accent, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text("AVG HR", color = secondary, fontSize = 7.sp, maxLines = 1)
+                                            Text("DIVE MAX", color = secondary, fontSize = 10.sp, maxLines = 1)
+                                            Text("%.1f m".format(lastDiveMax), color = accent, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            Spacer(modifier = Modifier.height(1.dp))
+                                            Text("AVG HR", color = secondary, fontSize = 10.sp, maxLines = 1)
                                             Text(
                                                 if (lastDiveAverageHeartRate > 0) "$lastDiveAverageHeartRate BPM" else "-- BPM",
                                                 color = Color.White,
-                                                fontSize = 10.sp,
+                                                fontSize = 15.sp,
                                                 fontWeight = FontWeight.Medium,
                                                 maxLines = 1
                                             )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text("DIVE TIME", color = secondary, fontSize = 7.sp, maxLines = 1)
-                                            Text(formatDuration(lastDiveSeconds), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            Spacer(modifier = Modifier.height(1.dp))
+                                            Text("DIVE TIME", color = secondary, fontSize = 10.sp, maxLines = 1)
+                                            Text(formatDuration(lastDiveSeconds), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                         }
                                         Column(
                                             modifier = Modifier.weight(1.2f),
@@ -386,12 +386,23 @@ fun FreeDiveScreen() {
                                                 fontSize = 8.sp,
                                                 maxLines = 1
                                             )
+                                            // SESSION MAX now sits below the interval timer.
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text(
+                                                "SESSION MAX",
+                                                color = secondary,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                "%.1f m".format(sessionMax),
+                                                color = accent,
+                                                fontSize = 19.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1
+                                            )
                                         }
-                                    }
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("SESSION MAX", color = secondary, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                        Text("%.1f m".format(sessionMax), color = accent, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                     }
                                 }
                             }
