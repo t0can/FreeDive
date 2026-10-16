@@ -60,12 +60,7 @@ import kotlin.math.ceil
 import androidx.compose.foundation.layout.padding
 import android.view.WindowManager
 
-// SECTION 1 — SESSION RECORDS
-private data class DiveRecord(
-    val durationSeconds: Int,
-    val maximumDepthMetres: Float,
-    val averageHeartRate: Int
-)
+// SECTION 1 — SESSION RECORDS LIVE IN DiveSessionService.kt
 
 class MainActivity : ComponentActivity() {
 
@@ -73,6 +68,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
+            androidx.compose.runtime.LaunchedEffect(DiveState.sessionActive) {
+                if (DiveState.sessionActive) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
             FreeDiveScreen(
                 onSessionActiveChanged = { active ->
                     if (active) {
@@ -99,264 +98,82 @@ fun FreeDiveScreen(
     val accent = Color(0xFF63D8D2)
     val secondary = Color(0xFFA9C6CE)
     val context = LocalContext.current
-    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
+    val pagerState = rememberPagerState(initialPage = if (DiveState.sessionActive) 1 else 0, pageCount = { 4 })
     val scope = rememberCoroutineScope()
 
-    // SECTION 3 — SESSION STATE
-    var sessionActive by remember { mutableStateOf(false) }
-    var sessionEnded by remember { mutableStateOf(false) }
-    var sessionStartMs by remember { mutableStateOf(0L) }
-    var sessionSeconds by remember { mutableStateOf(0) }
-    var isDiving by remember { mutableStateOf(false) }
-    var currentDepth by remember { mutableStateOf(0f) }
-    var currentHeartRate by remember { mutableStateOf<Int?>(null) }
-    var diveStartMs by remember { mutableStateOf(0L) }
-    var diveElapsedSeconds by remember { mutableStateOf(0) }
-    var currentDiveMax by remember { mutableStateOf(0f) }
-    var lastDiveMax by remember { mutableStateOf(0f) }
-    var sessionMax by remember { mutableStateOf(0f) }
-    var lastDiveSeconds by remember { mutableStateOf(0) }
-    var lastDiveAverageHeartRate by remember { mutableStateOf(0) }
-    var heartRateTotal by remember { mutableStateOf(0) }
-    var heartRateSamples by remember { mutableStateOf(0) }
-    var intervalRemainingSeconds by remember { mutableStateOf(0) }
-    var intervalEndMs by remember { mutableStateOf(0L) }
-    var intervalActive by remember { mutableStateOf(false) }
-    var intervalComplete by remember { mutableStateOf(false) }
-    val completedDives = remember { mutableStateListOf<DiveRecord>() }
-
-    // SECTION 3A — REAL HEART-RATE SENSOR (DEPTH REMAINS SIMULATED)
-    val sensorManager = remember(context) {
-        context.getSystemService(SensorManager::class.java)
-    }
-    val heartSensor = remember(sensorManager) {
-        sensorManager?.getDefaultSensor(Sensor.TYPE_HEART_RATE)
-    }
-    val heartPermission = if (Build.VERSION.SDK_INT >= 36) {
-        "android.permission.health.READ_HEART_RATE"
-    } else {
-        Manifest.permission.BODY_SENSORS
-    }
+    // SECTION 3 — SERVICE-OWNED STATE (READ BY COMPOSE)
+    val state = DiveState
+    val sessionActive = state.sessionActive
+    val sessionEnded = state.sessionEnded
+    val sessionSeconds = state.sessionSeconds
+    val isDiving = state.isDiving
+    val currentDepth = state.currentDepth
+    val currentHeartRate = state.currentHeartRate
+    val diveElapsedSeconds = state.diveElapsedSeconds
+    val lastDiveMax = state.lastDiveMax
+    val sessionMax = state.sessionMax
+    val lastDiveSeconds = state.lastDiveSeconds
+    val lastDiveAverageHeartRate = state.lastDiveAverageHeartRate
+    val intervalActive = state.intervalActive
+    val intervalComplete = state.intervalComplete
+    val intervalRemainingSeconds = state.intervalRemainingSeconds
+    val completedDives = state.completedDives
+    val pressureHpa = state.pressureHpa
+    val referencePressureHpa = state.referencePressureHpa
+    val pressureSensorRunning = state.pressureSensorRunning
+    val pressureHistory = state.pressureHistory
+    val maxPositiveDeltaHpa = state.maxPositiveDeltaHpa
+    val recordingSeconds = state.recordingSeconds
+    val hpaPerMetre = DiveState.HPA_PER_METRE
+    val heartPermission = if (Build.VERSION.SDK_INT >= 36)
+        "android.permission.health.READ_HEART_RATE" else Manifest.permission.BODY_SENSORS
     var heartPermissionGranted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, heartPermission) ==
-                    PackageManager.PERMISSION_GRANTED
-        )
+        mutableStateOf(ContextCompat.checkSelfPermission(context, heartPermission) == PackageManager.PERMISSION_GRANTED)
     }
     val heartPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        heartPermissionGranted = granted
-    }
+    ) { granted -> heartPermissionGranted = granted }
 
-    DisposableEffect(sessionActive, heartPermissionGranted, heartSensor) {
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val bpm = event.values.firstOrNull()?.toInt() ?: return
-                if (bpm in 30..240) {
-                    currentHeartRate = bpm
-                    // Sample real HR readings during a dive, not simulated depth ticks.
-                    if (sessionActive && isDiving) {
-                        heartRateTotal += bpm
-                        heartRateSamples++
-                    }
-                }
-            }
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-        }
-        if (sessionActive && heartPermissionGranted && heartSensor != null) {
-            sensorManager?.registerListener(
-                listener, heartSensor, SensorManager.SENSOR_DELAY_NORMAL
-            )
-        }
-        onDispose { sensorManager?.unregisterListener(listener) }
+    // SECTION 3A — NOTIFICATION PERMISSION (ANDROID 13+)
+    // Request while the app is visible. Recording can still run if denied.
+    val notificationPermission = Manifest.permission.POST_NOTIFICATIONS
+    var notificationPermissionGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < 33 ||
+                    ContextCompat.checkSelfPermission(context, notificationPermission) == PackageManager.PERMISSION_GRANTED
+        )
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> notificationPermissionGranted = granted }
 
-    // SECTION 3B — LIVE BAROMETRIC PRESSURE AND EXPERIMENTAL DEPTH
-    // Experimental seawater conversion: 100.55 hPa per metre (density 1025 kg/m³, g 9.81 m/s²).
-    // NOT calibrated, verified or suitable for dive safety decisions.
-    val hpaPerMetre = 100.55f
-    var sessionSurfacePressureHpa by remember { mutableStateOf<Float?>(null) }
-    val pressureSensor = remember(sensorManager) {
-        sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
-    }
-    var pressureHpa by remember { mutableStateOf<Float?>(null) }
-    var referencePressureHpa by remember { mutableStateOf<Float?>(null) }
-    var pressureSensorRunning by remember { mutableStateOf(false) }
-    // One sample per second, keeping the most recent five minutes.
-    val pressureHistory = remember { mutableStateListOf<Float>() }
-    var maxPositiveDeltaHpa by remember { mutableStateOf(0f) }
-    var recordingSeconds by remember { mutableStateOf(0) }
-
-    LaunchedEffect(pressureSensorRunning) {
-        while (pressureSensorRunning) {
-            val pressure = pressureHpa
-            val reference = referencePressureHpa
-            if (pressure != null && reference != null) {
-                val delta = pressure - reference
-                pressureHistory.add(delta)
-                if (pressureHistory.size > 300) pressureHistory.removeAt(0)
-                maxPositiveDeltaHpa = maxOf(maxPositiveDeltaHpa, delta)
-                recordingSeconds++
-            }
-            delay(1000L)
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && !notificationPermissionGranted) {
+            notificationPermissionLauncher.launch(notificationPermission)
         }
     }
 
-
-    DisposableEffect(sensorManager, pressureSensor) {
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val reading = event.values.firstOrNull() ?: return
-                pressureHpa = reading
-                if (referencePressureHpa == null) {
-                    referencePressureHpa = reading
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-        }
-
-        pressureSensorRunning = if (pressureSensor != null) {
-            sensorManager?.registerListener(
-                listener, pressureSensor, SensorManager.SENSOR_DELAY_NORMAL
-            ) == true
-        } else {
-            false
-        }
-
-        onDispose {
-            sensorManager?.unregisterListener(listener)
-        }
-    }
-
-    // SECTION 4 — VIBRATION AND SESSION ACTIONS
-    fun vibrateWatch() {
-        val vibrator = context.getSystemService(Vibrator::class.java)
-        if (vibrator?.hasVibrator() == true) {
-            vibrator.vibrate(VibrationEffect.createOneShot(200L, VibrationEffect.DEFAULT_AMPLITUDE))
-        }
-    }
-
+    // SECTION 4 — SESSION COMMANDS
     fun startSession() {
-        // Capture surface pressure while dry, before entering water.
-        // If no reading is available, do not fabricate a depth.
-        sessionSurfacePressureHpa = if (pressureSensorRunning) pressureHpa else null
-        completedDives.clear()
-        sessionStartMs = SystemClock.elapsedRealtime()
-        sessionSeconds = 0
-        isDiving = false
-        currentDepth = 0f
-        currentHeartRate = null
-        diveStartMs = 0L
-        diveElapsedSeconds = 0
-        currentDiveMax = 0f
-        lastDiveMax = 0f
-        sessionMax = 0f
-        lastDiveSeconds = 0
-        lastDiveAverageHeartRate = 0
-        heartRateTotal = 0
-        heartRateSamples = 0
-        intervalRemainingSeconds = 0
-        intervalEndMs = 0L
-        intervalActive = false
-        intervalComplete = false
-        sessionEnded = false
-        sessionActive = true
-        // Keep the watch display awake during the session.
-        onSessionActiveChanged(true)
+        ContextCompat.startForegroundService(context,
+            android.content.Intent(context, DiveSessionService::class.java).apply {
+                action = DiveSessionService.ACTION_START
+            })
+        // Ask for heart permission before recording on the next session if needed.
+        if (!heartPermissionGranted) heartPermissionLauncher.launch(heartPermission)
     }
-
     fun endSession() {
-        if (!sessionActive || isDiving) return
-        sessionSeconds = ((SystemClock.elapsedRealtime() - sessionStartMs) / 1000L).toInt()
-        sessionActive = false
-        sessionEnded = true
-        intervalActive = false
-        // Restore normal watch screen behaviour.
-        onSessionActiveChanged(false)
+        context.startService(android.content.Intent(context, DiveSessionService::class.java).apply {
+            action = DiveSessionService.ACTION_STOP
+        })
     }
 
-    // SECTION 5 — EXPERIMENTAL DEPTH AND HEART RATE PROCESSING
-    fun updateReading(depth: Float) {
-        if (!sessionActive) return
-        val now = SystemClock.elapsedRealtime()
-        currentDepth = depth.coerceAtLeast(0f)
-
-        if (!isDiving && currentDepth > 1.0f) {
-            isDiving = true
-            currentDiveMax = currentDepth
-            diveStartMs = now
-            diveElapsedSeconds = 0
-            heartRateTotal = 0
-            heartRateSamples = 0
-            intervalActive = false
-            intervalComplete = false
-            vibrateWatch()
-        }
-
-        if (isDiving) {
-            currentDiveMax = maxOf(currentDiveMax, currentDepth)
-            sessionMax = maxOf(sessionMax, currentDepth)
-            if (currentDepth <= 1.0f) {
-                lastDiveMax = currentDiveMax
-                lastDiveSeconds = ((now - diveStartMs) / 1000L).toInt()
-                lastDiveAverageHeartRate =
-                    if (heartRateSamples > 0) heartRateTotal / heartRateSamples else 0
-                completedDives.add(
-                    DiveRecord(lastDiveSeconds, lastDiveMax, lastDiveAverageHeartRate)
-                )
-                val intervalSeconds = lastDiveSeconds * 2
-                intervalRemainingSeconds = intervalSeconds
-                intervalEndMs = now + intervalSeconds * 1000L
-                intervalActive = intervalSeconds > 0
-                intervalComplete = intervalSeconds == 0
-                isDiving = false
-                vibrateWatch()
-            }
-        }
-    }
-
-    // SECTION 6 — EXPERIMENTAL DEPTH FROM LIVE PRESSURE (NO SIMULATION)
-    // The session baseline is captured on START SESSION and held fixed until END.
-    // If the sensor stops reporting, the last value is stale; do not use it for safety.
-    LaunchedEffect(sessionActive, pressureHpa, sessionSurfacePressureHpa) {
-        val live = pressureHpa
-        val surface = sessionSurfacePressureHpa
-        if (sessionActive && pressureSensorRunning && live != null && surface != null) {
-            val estimatedDepthMetres = ((live - surface) / hpaPerMetre).coerceAtLeast(0f)
-            updateReading(estimatedDepthMetres)
-        }
-    }
-
-    // SECTION 7 — TIMERS
-    LaunchedEffect(sessionActive) {
-        while (sessionActive) {
-            val now = SystemClock.elapsedRealtime()
-            sessionSeconds = ((now - sessionStartMs) / 1000L).toInt()
-            if (isDiving) {
-                diveElapsedSeconds = ((now - diveStartMs) / 1000L).toInt()
-            }
-            if (intervalActive) {
-                val secondsLeft = ceil(
-                    (intervalEndMs - now).coerceAtLeast(0L) / 1000.0
-                ).toInt()
-                intervalRemainingSeconds = secondsLeft
-                if (secondsLeft == 0) {
-                    intervalActive = false
-                    intervalComplete = true
-                    vibrateWatch()
-                }
-            }
-            delay(250L)
-        }
-    }
-
+    // SECTION 5 — SENSOR COLLECTION, DEPTH AND TIMERS NOW RUN IN DiveSessionService.kt
+    // SECTION 6 — PRESSURE HISTORY NOW RUNS IN DiveSessionService.kt
+    // SECTION 7 — SESSION CLOCK NOW RUNS IN DiveSessionService.kt
     // SECTION 8 — KEEP DIVE FACE VISIBLE WHILE UNDERWATER
     LaunchedEffect(isDiving, sessionActive) {
-        if (sessionActive && isDiving && pagerState.currentPage != 1) {
-            pagerState.scrollToPage(1)
-        }
+        if (sessionActive && isDiving && pagerState.currentPage != 1) pagerState.scrollToPage(1)
     }
 
     // SECTION 9 — ALL FOUR PAGES (LIVE DEPTH + DIAGNOSTIC)
@@ -390,14 +207,9 @@ fun FreeDiveScreen(
                                 Text("EXPERIMENTAL • NOT FOR DIVING", color = secondary, fontSize = 8.sp, maxLines = 1)
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Button(onClick = {
-                                    if (!sessionActive && pressureSensorRunning && pressureHpa != null) {
-                                        startSession()
-                                        if (!heartPermissionGranted) {
-                                            heartPermissionLauncher.launch(heartPermission)
-                                        }
-                                    }
+                                    if (!sessionActive) startSession()
                                     scope.launch { pagerState.animateScrollToPage(1) }
-                                }, enabled = sessionActive || (pressureSensorRunning && pressureHpa != null)) {
+                                }, enabled = true) {
                                     Text(if (sessionActive) "RETURN TO DIVE" else "START SESSION")
                                 }
                             }
@@ -410,7 +222,7 @@ fun FreeDiveScreen(
                                         color = secondary,
                                         fontSize = 12.sp
                                     )
-                                } else if (sessionSurfacePressureHpa == null) {
+                                } else if (state.surfacePressureHpa == null) {
                                     Text("WAITING FOR PRESSURE", color = secondary, fontSize = 11.sp)
                                 } else if (isDiving) {
                                     // DIVE FACE — experimental pressure-derived depth
@@ -430,7 +242,7 @@ fun FreeDiveScreen(
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = "%.1fM".format(currentDepth),
+                                        text = if (state.stale) "--.-M" else "%.1fM".format(currentDepth),
                                         color = accent,
                                         fontSize = 48.sp,
                                         fontWeight = FontWeight.Bold,
@@ -583,7 +395,7 @@ fun FreeDiveScreen(
                                     pressureHpa!! - referencePressureHpa!! else null
                                 Text(
                                     when {
-                                        pressureSensor == null -> "SENSOR NOT FOUND"
+                                        !sessionActive -> "START SESSION TO RECORD"
                                         !pressureSensorRunning -> "SENSOR NOT RUNNING"
                                         delta == null -> "WAITING FOR READING"
                                         else -> "LIVE • 1 SAMPLE/SEC"
@@ -609,14 +421,28 @@ fun FreeDiveScreen(
                                     "MAX +%.2f hPa    %ds".format(maxPositiveDeltaHpa, recordingSeconds),
                                     color = Color.White, fontSize = 10.sp, maxLines = 1
                                 )
+                                // SECTION 9A — PRESSURE CONTINUITY (SERVICE SENSOR EVENTS)
+                                Text(
+                                    "SAMPLES ${state.totalPressureSamples}   GAPS >3s ${state.gapsOver3Seconds}",
+                                    color = Color.White, fontSize = 9.sp, maxLines = 1
+                                )
+                                Text(
+                                    "LONGEST GAP %.2fs".format(state.longestSampleGapMs / 1000.0),
+                                    color = secondary, fontSize = 9.sp, maxLines = 1
+                                )
+                                Text(
+                                    if (state.lastPressureSampleMs == 0L) "LAST READING --"
+                                    else "READING AGE %.1fs".format(state.lastPressureAgeMs / 1000.0),
+                                    color = secondary, fontSize = 9.sp, maxLines = 1
+                                )
+                                if (state.stale) {
+                                    Text("PRESSURE DATA STALE", color = Color.Red, fontSize = 9.sp, maxLines = 1)
+                                }
                                 Button(
                                     onClick = {
-                                        referencePressureHpa = pressureHpa
-                                        pressureHistory.clear()
-                                        maxPositiveDeltaHpa = 0f
-                                        recordingSeconds = 0
+                                        state.resetGraph()
                                     },
-                                    enabled = pressureHpa != null
+                                    enabled = sessionActive && pressureHpa != null
                                 ) { Text("RESET TEST", fontSize = 10.sp) }
                             }
                         }

@@ -1,18 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <uses-permission android:name="android.permission.VIBRATE" />
-
+    <!-- SECTION M1 — DEVICE AND NOTIFICATION PERMISSIONS -->
     <uses-feature android:name="android.hardware.type.watch" />
-
-    <uses-permission
-        android:name="android.permission.BODY_SENSORS"
-        android:maxSdkVersion="35" />
-
-    <uses-permission
-        android:name="android.permission.health.READ_HEART_RATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.BODY_SENSORS" android:maxSdkVersion="35" />
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <!-- SECTION M2 — FOREGROUND SERVICE PERMISSIONS -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
 
     <application
         android:allowBackup="true"
@@ -20,21 +17,10 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
-        <uses-library
-            android:name="com.google.android.wearable"
-            android:required="true" />
-        <uses-library
-            android:name="wear-sdk"
-            android:required="false" />
-
-        <!--
-               Set to true if your app is Standalone, that is, it does not require the handheld
-               app to run.
-        -->
-        <meta-data
-            android:name="com.google.android.wearable.standalone"
-            android:value="true" />
-
+        <uses-library android:name="com.google.android.wearable" android:required="true" />
+        <uses-library android:name="wear-sdk" android:required="false" />
+        <meta-data android:name="com.google.android.wearable.standalone" android:value="true" />
+        <!-- SECTION M3 — MAIN ACTIVITY -->
         <activity
             android:name=".presentation.MainActivity"
             android:exported="true"
@@ -42,10 +28,13 @@
             android:theme="@style/MainActivityTheme.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- SECTION M4 — CONTINUOUS RECORDING SERVICE -->
+        <service
+            android:name=".presentation.DiveSessionService"
+            android:exported="false"
+            android:foregroundServiceType="health" />
     </application>
-
 </manifest>

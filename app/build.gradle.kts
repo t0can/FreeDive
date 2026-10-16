@@ -54,4 +54,5 @@ dependencies {
     debugImplementation(libs.ui.test.manifest)
     debugImplementation(libs.ui.tooling)
     implementation("androidx.health:health-services-client:1.1.0-alpha03")
+    implementation("androidx.wear:wear-ongoing:1.1.0")
 }
